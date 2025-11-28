@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <random>
 #include <unordered_map>
+#include <omp.h>
 
 using namespace std;
 
@@ -27,14 +28,20 @@ FMPartitioner::FMPartitioner(Parser& p, double lowerRatio, double upperRatio) : 
 
 int FMPartitioner::computeCutSize() {
     int cut = 0;
-    for (const auto& net : parser.nets) {
-        int firstP = parser.cells[net.cells[0]].partition;
+    const auto& nets = parser.nets;
+    const auto& cells = parser.cells;
+#pragma omp parallel for reduction(+:cut) schedule(static)
+    for (int i = 0; i < (int)nets.size(); ++i) {
+        const auto& net = nets[i];
+        int firstP = cells[net.cells[0]].partition;
+        bool diff = false;
         for (int cellIdx : net.cells) {
-            if (parser.cells[cellIdx].partition != firstP) {
-                cut++;
+            if (cells[cellIdx].partition != firstP) {
+                diff = true;
                 break;
             }
         }
+        if (diff) cut++;
     }
     return cut;
 }
@@ -110,7 +117,9 @@ void FMPartitioner::initBuckets() {
     cellGain.assign(cells.size(), 0);
     inBucket.assign(cells.size(), 0);
 
-    for(int i = 0; i < (int)nets.size(); i++) {
+    int netSize = (int)nets.size();
+#pragma omp parallel for schedule(static)
+    for(int i = 0; i < netSize; i++) {
         for(auto cellIdx : parser.nets[i].cells ) {
             netCount[i][cells[cellIdx].partition]++;
         }
@@ -385,15 +394,22 @@ void FMPartitioner::partition(const vector<int>& init, int k, bool isParent) {
 
     {
         FMPartitioner subFM_A(subA, lr, rr);
-        auto initA = greedyInit2Way(subA);
-        subFM_A.partition(initA, 2, false);
-        mergeBack(0, subA, new2oldA);
-    }
-    {
         FMPartitioner subFM_B(subB, lr, rr);
-        auto initB = greedyInit2Way(subB);
-        subFM_B.partition(initB, 2, false);
-        mergeBack(1, subB, new2oldB);
+#pragma omp parallel sections
+        {
+#pragma omp section
+            {
+                auto initA = greedyInit2Way(subA);
+                subFM_A.partition(initA, 2, false);
+                mergeBack(0, subA, new2oldA);
+            }
+#pragma omp section
+            {
+                auto initB = greedyInit2Way(subB);
+                subFM_B.partition(initB, 2, false);
+                mergeBack(1, subB, new2oldB);
+            }
+        }
     }
 
     parser.cutSize = computeCutSize();
